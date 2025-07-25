@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV to Oncor Service Area Map Plotter</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
+    <!-- Library for capturing HTML as an image -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" xintegrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoVBL5gI9kDXrd3NBGQVnxo1JEXpHg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <style>
+        #map { height: 600px; border-radius: 0.5rem; }
+        .file-input-button { cursor: pointer; }
+        .custom-marker-container { position: relative; width: 80px; height: 40px; }
+        .marker-dot { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: 6px; height: 6px; border: 1px solid; border-radius: 50%; }
+        .marker-label { position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; font-weight: bold; font-size: 12px; text-shadow: 0 0 2px #fff, 0 0 2px #fff, 0 0 2px #fff; }
+        .custom-marker-container.label-top .marker-label { bottom: 25px; }
+        .custom-marker-container.label-bottom .marker-label { top: 25px; }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans p-4 sm:p-6 md:p-8">
+    <div class="max-w-4xl mx-auto bg-white rounded-lg shadow-lg p-6">
+        <header class="mb-6 text-center">
+            <h1 class="text-3xl font-bold text-gray-800">CSV to Oncor Service Area Map Plotter</h1>
+            <p class="text-gray-600 mt-2">Upload a CSV file, then select a data column to display on the map.</p>
+        </header>
+
+        <!-- Action Buttons Section -->
+        <div class="mb-4 flex flex-col sm:flex-row justify-center items-center gap-4">
+            <label for="csvFile" class="file-input-button bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg transition duration-300 ease-in-out">
+                Select CSV File
+            </label>
+            <input type="file" id="csvFile" class="hidden" accept=".csv">
+            <button id="downloadMapBtn" class="bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition duration-300 ease-in-out">
+                Download as Image
+            </button>
+        </div>
+        <p id="fileName" class="text-sm text-center text-gray-500 -mt-2 mb-4">No file selected.</p>
+
+        <div id="headerSelectionContainer" class="hidden mb-4 flex flex-col items-center">
+            <label for="headerSelect" class="font-semibold text-gray-700 mb-2">Select Header to Display on Map:</label>
+            <select id="headerSelect" class="border border-gray-300 rounded-md p-2 w-full max-w-xs"></select>
+        </div>
+
+        <div id="map" class="w-full z-0"></div>
+
+        <div id="messageBox" class="hidden mt-4 p-4 rounded-md text-white text-center"></div>
+    </div>
+
+    <script>
+        // --- DOM Element References ---
+        const csvFileInput = document.getElementById('csvFile');
+        const fileNameDisplay = document.getElementById('fileName');
+        const messageBox = document.getElementById('messageBox');
+        const headerSelectionContainer = document.getElementById('headerSelectionContainer');
+        const headerSelect = document.getElementById('headerSelect');
+        const downloadMapBtn = document.getElementById('downloadMapBtn');
+
+        // --- Global State ---
+        let map;
+        let markerLayer;
+        let backgroundLayer;
+        let oncorLayer = null; // To store the Oncor service area layer for centering
+        let parsedData = [];
+        let selectedHeader = null;
+
+        // --- URLs FOR YOUR CUSTOM MAP LAYERS ---
+        const geojsonUrls = [
+            'https://raw.githubusercontent.com/ErikWeather/my-map-data/main/Oncor_Servce_Area.geojson',
+            'https://raw.githubusercontent.com/ErikWeather/my-map-data/main/USTX_Interstates.geojson',
+            'https://raw.githubusercontent.com/ErikWeather/my-map-data/main/Texas.geojson',
+            'https://raw.githubusercontent.com/ErikWeather/my-map-data/main/Texas_counties.geojson'
+        ];
+
+        // --- STYLING FOR YOUR CUSTOM MAP LAYERS ---
+        const backgroundStyles = [
+            { color: "#f07624", weight: 2, opacity: 0.9, fillOpacity: 0.1, fillColor: "#f07624" },
+            { color: "#800080", weight: 2.5, opacity: 0.7 },
+            { color: "#000000", weight: 3, opacity: 1, fill: false },
+            { color: "#555", weight: 1, opacity: 0.8, fillOpacity: 0.05, fillColor: "#f0f0f0" }
+        ];
+
+        /**
+         * Initializes the Leaflet map.
+         */
+        function initializeMap() {
+            if (map) map.remove();
+            map = L.map('map').setView([31.9686, -99.9096], 6);
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+                subdomains: 'abcd',
+                maxZoom: 20
+            }).addTo(map);
+
+            backgroundLayer = L.layerGroup().addTo(map);
+            markerLayer = L.layerGroup().addTo(map);
+
+            loadCustomBackground();
+        }
+
+        /**
+         * Fetches and displays the custom GeoJSON background layers from your URLs.
+         */
+        async function loadCustomBackground() {
+            showMessage('Loading custom map background...', 'info');
+            try {
+                for (let i = 0; i < geojsonUrls.length; i++) {
+                    const url = geojsonUrls[i];
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`Failed to fetch GeoJSON from ${url}`);
+                    const data = await response.json();
+                    const style = backgroundStyles[i] || backgroundStyles[0];
+                    const geoJsonLayer = L.geoJSON(data, { style: style });
+                    backgroundLayer.addLayer(geoJsonLayer);
+
+                    // Check if this is the Oncor layer and store it for later use
+                    if (url.includes('Oncor_Servce_Area.geojson')) {
+                        oncorLayer = geoJsonLayer;
+                    }
+                }
+                hideMessage();
+            } catch (error) {
+                console.error('Error loading custom background:', error);
+                showMessage('Error loading custom map background. Check console for details.', 'error');
+            }
+        }
+
+        /**
+         * Captures the map element and downloads it as a PNG image.
+         * Will first center the map on the Oncor Service Area if it has been loaded.
+         */
+        function downloadMap() {
+            showMessage('Preparing map for download...', 'info');
+            const mapElement = document.getElementById('map');
+
+            const captureImage = () => {
+                showMessage('Generating image, please wait...', 'info');
+                const options = {
+                    useCORS: true,
+                    allowTaint: true,
+                    onclone: (doc) => {
+                        const mapPane = doc.querySelector('.leaflet-map-pane');
+                        if (mapPane) {
+                            mapPane.style.transform = '';
+                        }
+                    }
+                };
+
+                html2canvas(mapElement, options).then(canvas => {
+                    const link = document.createElement('a');
+                    link.download = 'map_export.png';
+                    link.href = canvas.toDataURL('image/png');
+                    link.click();
+                    hideMessage();
+                }).catch(error => {
+                    console.error('Error generating map image:', error);
+                    showMessage('Could not generate image. See console for details.', 'error');
+                });
+            };
+
+            // If the Oncor layer has been loaded, center on it first.
+            if (oncorLayer && oncorLayer.getBounds().isValid()) {
+                const bounds = oncorLayer.getBounds();
+                map.fitBounds(bounds, { padding: [20, 20] }); // Add some padding for better framing
+
+                // Wait for the map's 'moveend' event to ensure the animation is complete
+                map.once('moveend', function() {
+                    // A small extra delay to ensure all tiles have finished rendering after the move
+                    setTimeout(captureImage, 500);
+                });
+            } else {
+                // If the Oncor layer isn't available for any reason, just capture the current view
+                captureImage();
+            }
+        }
+
+
+        function showMessage(message, type) {
+            messageBox.textContent = message;
+            messageBox.className = 'mt-4 p-4 rounded-md text-white text-center';
+            switch (type) {
+                case 'success': messageBox.classList.add('bg-green-500'); break;
+                case 'error': messageBox.classList.add('bg-red-500'); break;
+                default: messageBox.classList.add('bg-blue-500'); break;
+            }
+            messageBox.classList.remove('hidden');
+        }
+
+        function hideMessage() {
+            messageBox.classList.add('hidden');
+        }
+
+        function handleFileSelect(event) {
+            hideMessage();
+            const file = event.target.files[0];
+            if (!file) {
+                fileNameDisplay.textContent = 'No file selected.';
+                return;
+            }
+            if (file.type !== 'text/csv') {
+                showMessage('Error: Please select a valid .csv file.', 'error');
+                fileNameDisplay.textContent = 'Invalid file type.';
+                csvFileInput.value = '';
+                return;
+            }
+            fileNameDisplay.textContent = `Selected: ${file.name}`;
+            Papa.parse(file, {
+                header: true,
+                dynamicTyping: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    parsedData = results.data;
+                    populateHeaderSelector(results.meta.fields);
+                    plotData();
+                },
+                error: function(error) {
+                    showMessage(`Error parsing CSV: ${error.message}`, 'error');
+                }
+            });
+        }
+
+        function populateHeaderSelector(headers) {
+            headerSelect.innerHTML = '<option value="">-- Show Location Dots Only --</option>';
+            const latKey = headers.find(h => h.toLowerCase() === 'latitude' || h.toLowerCase() === 'lat');
+            const lonKey = headers.find(h => h.toLowerCase() === 'longitude' || h.toLowerCase() === 'lon' || h.toLowerCase() === 'lng');
+            headers.forEach(header => {
+                if (header !== latKey && header !== lonKey) {
+                    const option = document.createElement('option');
+                    option.value = header;
+                    option.textContent = header;
+                    headerSelect.appendChild(option);
+                }
+            });
+            headerSelectionContainer.classList.remove('hidden');
+        }
+
+        function getValueColor(value) {
+            if (value < 30) return 'green';
+            if (value >= 30 && value < 50) return 'darkorange';
+            if (value >= 50 && value < 70) return 'red';
+            if (value >= 70) return 'purple';
+            return 'black';
+        }
+
+        function plotData() {
+            markerLayer.clearLayers();
+            let pointsAdded = 0;
+            const markers = [];
+            if (parsedData.length === 0) return;
+            let isNumeric = selectedHeader && parsedData.some(row => typeof row[selectedHeader] === 'number');
+            
+            parsedData.forEach(row => {
+                const latKey = Object.keys(row).find(k => k.toLowerCase() === 'latitude' || k.toLowerCase() === 'lat');
+                const lonKey = Object.keys(row).find(k => k.toLowerCase() === 'longitude' || k.toLowerCase() === 'lon' || k.toLowerCase() === 'lng');
+
+                if (row[latKey] != null && row[lonKey] != null && !isNaN(row[latKey]) && !isNaN(row[lonKey])) {
+                    const lat = row[latKey];
+                    const lon = row[lonKey];
+                    const displayValue = row[selectedHeader];
+                    let dotColor = '#000000', labelColor = '#000000';
+
+                    if (isNumeric && typeof displayValue === 'number') {
+                        const color = getValueColor(displayValue);
+                        dotColor = color;
+                        labelColor = color;
+                    }
+
+                    const isEven = pointsAdded % 2 === 0;
+                    const positionClass = isEven ? 'label-top' : 'label-bottom';
+                    const labelHtml = selectedHeader && displayValue != null ? `<div class="marker-label" style="color: ${labelColor};">${displayValue}</div>` : '';
+                    const iconHtml = `<div class="custom-marker-container ${positionClass}"><div class="marker-dot" style="background-color: ${dotColor}; border-color: ${dotColor};"></div>${labelHtml}</div>`;
+                    const dataIcon = L.divIcon({ html: iconHtml, className: '', iconSize: [80, 40], iconAnchor: [40, 20] });
+                    const marker = L.marker([lat, lon], { icon: dataIcon });
+                    
+                    let popupContent = `<div class="space-y-1 text-sm"><b>Lat:</b> ${lat}<br><b>Lon:</b> ${lon}<hr class="my-1">`;
+                    for (const key in row) {
+                        if (key !== latKey && key !== lonKey) {
+                           popupContent += `<b>${key}:</b> ${row[key]}<br>`;
+                        }
+                    }
+                    popupContent += '</div>';
+                    marker.bindPopup(popupContent);
+                    markers.push(marker);
+                    pointsAdded++;
+                }
+            });
+
+            if (pointsAdded > 0) {
+                markers.forEach(marker => markerLayer.addLayer(marker));
+                const group = new L.featureGroup(markers);
+                // Don't fit bounds here, let the download button control the final view if needed
+                // map.fitBounds(group.getBounds().pad(0.2)); 
+                showMessage(`${pointsAdded} points successfully plotted!`, 'success');
+            } else {
+                showMessage("Error: No valid 'latitude'/'longitude' columns found or no data rows.", 'error');
+            }
+        }
+
+        function handleHeaderChange(event) {
+            selectedHeader = event.target.value;
+            plotData();
+        }
+
+        // --- Event Listeners ---
+        csvFileInput.addEventListener('change', handleFileSelect);
+        headerSelect.addEventListener('change', handleHeaderChange);
+        downloadMapBtn.addEventListener('click', downloadMap);
+
+        window.onload = function() {
+            initializeMap();
+        };
+    </script>
+</body>
+</html>
